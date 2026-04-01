@@ -14,7 +14,8 @@
     "pulse": "tsx src/index.ts pulse",
     "daily": "tsx src/index.ts daily",
     "list": "tsx src/index.ts list-properties",
-    "check": "tsx src/index.ts check-config"
+    "check": "tsx src/index.ts check-config",
+    "sync": "tsx src/index.ts sync-clients"
   },
   "dependencies": {
     "@google-analytics/admin": "^9.0.1",

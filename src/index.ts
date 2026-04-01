@@ -6,6 +6,7 @@ import { runPulseCheck } from './commands/pulse.js';
 import { runDailyReport } from './commands/daily.js';
 import { runListProperties } from './commands/list-properties.js';
 import { runCheckConfig } from './commands/check-config.js';
+import { runSyncClients } from './commands/sync-clients.js';
 
 const program = new Command();
 
@@ -51,6 +52,15 @@ program
   .action(async () => {
     const env = loadEnv();
     await runCheckConfig(env);
+  });
+
+program
+  .command('sync-clients')
+  .alias('sync')
+  .description('Synchroniser les clients depuis GA4 Admin API + API Flow Client MV Group')
+  .action(async () => {
+    const env = loadEnv();
+    await runSyncClients(env);
   });
 
 program.parse();
