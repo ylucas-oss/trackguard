@@ -1,0 +1,58 @@
+{
+  "$schema": "./clients.schema.json",
+  "clients": [
+    {
+      "name": "Client A — E-commerce",
+      "ga4_property_id": "properties/123456789",
+      "template": "ecommerce",
+      "url": "https://www.client-a.fr",
+      "events_monitored": ["page_view", "form_submit", "add_to_cart", "begin_checkout", "purchase"],
+      "critical_pages": ["/", "/contact", "/panier", "/checkout"],
+      "thresholds": {
+        "pageview_drop_pct": 40,
+        "event_zero_days": 1,
+        "active_users_min": 1
+      }
+    },
+    {
+      "name": "Client B — Lead Gen",
+      "ga4_property_id": "properties/987654321",
+      "template": "lead_gen",
+      "url": "https://www.client-b.fr",
+      "events_monitored": ["page_view", "form_submit", "generate_lead"],
+      "critical_pages": ["/", "/contact"],
+      "thresholds": {
+        "pageview_drop_pct": 40,
+        "event_zero_days": 1,
+        "active_users_min": 1
+      }
+    },
+    {
+      "name": "Client C — Vitrine",
+      "ga4_property_id": "properties/111222333",
+      "template": "vitrine",
+      "url": "https://www.client-c.fr",
+      "events_monitored": ["page_view"],
+      "critical_pages": ["/"],
+      "thresholds": {
+        "pageview_drop_pct": 50,
+        "event_zero_days": 2,
+        "active_users_min": 0
+      }
+    }
+  ],
+  "templates": {
+    "vitrine": {
+      "events": ["page_view"],
+      "description": "Site vitrine — monitoring pageviews uniquement"
+    },
+    "lead_gen": {
+      "events": ["page_view", "form_submit", "generate_lead"],
+      "description": "Site lead generation — pageviews + formulaires"
+    },
+    "ecommerce": {
+      "events": ["page_view", "form_submit", "add_to_cart", "begin_checkout", "purchase"],
+      "description": "Site e-commerce — pageviews + tunnel de conversion complet"
+    }
+  }
+}
