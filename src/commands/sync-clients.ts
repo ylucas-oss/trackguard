@@ -1,188 +1,184 @@
-import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import type { EnvConfig, ClientsFile, ClientConfig } from '../config/types.js';
-import { listProperties } from '../ga4/index.js';
 
 const MV_API_BASE = 'https://api.intranet.mv-group.fr/client';
+
+interface MVSiteWeb {
+  id: number;
+  code_client: string;
+  url: string;
+  analytics_fournisseur: string | null;
+  analytics_id: string | null;
+  tag_manager_tool: string | null;
+  tag_manager_id: string | null;
+}
 
 interface MVClient {
   code_client: string;
   raison_sociale: string;
-  nom_usuel: string;
   website: string;
   statut_ferme: boolean;
   nature: string;
-  secteur?: string;
-  filiales?: string[];
 }
 
+const TEMPLATE_EVENTS: Record<string, string[]> = {
+  vitrine: ['page_view'],
+  lead_gen: ['page_view', 'form_submit', 'generate_lead'],
+  ecommerce: ['page_view', 'form_submit', 'add_to_cart', 'begin_checkout', 'purchase'],
+};
+
 /**
- * Fetch from MV Group intranet API using curl (SSL cert issues with fetch).
+ * Fetch from MV Group intranet API using curl (internal SSL certs).
  */
-async function mvApiFetch(endpoint: string): Promise<unknown> {
+function mvApiFetch<T>(endpoint: string): T | null {
   const url = `${MV_API_BASE}${endpoint}`;
-  const { execSync } = await import('node:child_process');
   try {
-    const result = execSync(
-      `curl -sk --max-time 15 "${url}"`,
-      { encoding: 'utf-8', timeout: 20000 }
-    );
-    return JSON.parse(result);
+    const result = execSync(`curl -sk --max-time 15 "${url}"`, {
+      encoding: 'utf-8',
+      timeout: 20000,
+    });
+    return JSON.parse(result) as T;
   } catch {
     return null;
   }
 }
 
 /**
- * Search MV API for a client by name.
+ * Get structured sites-web for a client (with GA4/GTM IDs).
  */
-async function searchMVClient(query: string): Promise<MVClient[]> {
-  const result = await mvApiFetch(`/global/search?q=${encodeURIComponent(query)}`);
+function getClientSitesWeb(codeClient: string): MVSiteWeb[] {
+  const result = mvApiFetch<MVSiteWeb[]>(`/sites-web/by-client/${codeClient}`);
   if (!Array.isArray(result)) return [];
-  return result as MVClient[];
+  return result;
 }
 
 /**
- * Get sites-web for a client code.
+ * Search MV API for clients.
  */
-async function getClientSites(codeClient: string): Promise<string[]> {
-  const result = await mvApiFetch(`/flow-client-fiche/${codeClient}/sites-web`);
+function searchMVClients(query: string): MVClient[] {
+  const result = mvApiFetch<MVClient[]>(`/global/search?q=${encodeURIComponent(query)}`);
   if (!Array.isArray(result)) return [];
-  return result as string[];
+  return result;
 }
 
 /**
- * Get prestations for a client — check if they have tracking/analytics services.
+ * Get all active clients with websites by searching A-Z.
  */
-async function getClientPrestations(codeClient: string): Promise<{ hasTracking: boolean; hasEcommerce: boolean }> {
-  const result = await mvApiFetch(`/flow-client-fiche/${codeClient}/prestations-fast`);
-  if (!Array.isArray(result)) return { hasTracking: false, hasEcommerce: false };
+function getAllClientsWithWebsites(): Map<string, MVClient> {
+  const clients = new Map<string, MVClient>();
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz';
 
-  const prestations = result as Array<{ expertise?: string; libelle_article?: string; libelle_famille_article_niv1?: string }>;
+  for (const letter of alphabet) {
+    const results = searchMVClients(letter);
+    for (const c of results) {
+      if (!c.statut_ferme && c.website?.startsWith('http') && !clients.has(c.code_client)) {
+        clients.set(c.code_client, c);
+      }
+    }
+  }
 
-  const hasTracking = prestations.some(p =>
-    p.expertise?.includes('webanalyse') ||
-    p.libelle_famille_article_niv1?.includes('Tracking') ||
-    p.libelle_article?.toLowerCase().includes('tracking')
-  );
+  return clients;
+}
+
+/**
+ * Detect template based on prestations.
+ */
+function detectTemplate(codeClient: string): string {
+  const prestations = mvApiFetch<Array<{
+    expertise?: string;
+    libelle_article?: string;
+    libelle_famille_article_niv1?: string;
+  }>>(`/flow-client-fiche/${codeClient}/prestations-fast`);
+
+  if (!Array.isArray(prestations)) return 'vitrine';
 
   const hasEcommerce = prestations.some(p =>
     p.libelle_article?.toLowerCase().includes('e-commerce') ||
     p.libelle_article?.toLowerCase().includes('ecommerce') ||
     p.libelle_article?.toLowerCase().includes('transaction')
   );
-
-  return { hasTracking, hasEcommerce };
-}
-
-/**
- * Normalize URL for comparison (remove protocol, www, trailing slash).
- */
-function normalizeUrl(url: string): string {
-  return url
-    .replace(/^https?:\/\//, '')
-    .replace(/^www\./, '')
-    .replace(/\/+$/, '')
-    .toLowerCase();
-}
-
-/**
- * Try to match a GA4 property's website URL with MV API clients.
- */
-async function matchPropertyToClient(
-  propertyDisplayName: string,
-  propertyWebsiteUrl: string | undefined
-): Promise<{ mvClient: MVClient | null; sites: string[] }> {
-  // Strategy 1: Search by property display name
-  const searchResults = await searchMVClient(propertyDisplayName);
-
-  if (searchResults.length === 1) {
-    const sites = await getClientSites(searchResults[0]!.code_client);
-    return { mvClient: searchResults[0]!, sites };
-  }
-
-  // Strategy 2: If we have a website URL from GA4, match against search results
-  if (propertyWebsiteUrl && searchResults.length > 0) {
-    const normalizedTarget = normalizeUrl(propertyWebsiteUrl);
-    for (const client of searchResults) {
-      if (client.website && normalizeUrl(client.website) === normalizedTarget) {
-        const sites = await getClientSites(client.code_client);
-        return { mvClient: client, sites };
-      }
-    }
-  }
-
-  // Strategy 3: Return first active non-closed match
-  const activeClients = searchResults.filter(c => !c.statut_ferme && c.nature === 'CLI');
-  if (activeClients.length > 0) {
-    const sites = await getClientSites(activeClients[0]!.code_client);
-    return { mvClient: activeClients[0]!, sites };
-  }
-
-  return { mvClient: null, sites: [] };
-}
-
-/**
- * Detect template based on prestations and client info.
- */
-function detectTemplate(hasTracking: boolean, hasEcommerce: boolean): string {
   if (hasEcommerce) return 'ecommerce';
+
+  const hasTracking = prestations.some(p =>
+    p.expertise?.includes('webanalyse') ||
+    p.libelle_famille_article_niv1?.includes('Tracking') ||
+    p.libelle_article?.toLowerCase().includes('tracking')
+  );
   if (hasTracking) return 'lead_gen';
+
   return 'vitrine';
 }
 
+/**
+ * Normalize GA4 property ID to properties/XXXXXXX format.
+ */
+function normalizePropertyId(analyticsId: string): string {
+  const trimmed = analyticsId.trim();
+  // Already in properties/ format
+  if (trimmed.startsWith('properties/')) return trimmed;
+  // Pure numeric ID
+  if (/^\d+$/.test(trimmed)) return `properties/${trimmed}`;
+  // G- measurement ID (not a property ID, but store it)
+  if (trimmed.startsWith('G-')) return trimmed;
+  return trimmed;
+}
+
 export async function runSyncClients(env: EnvConfig): Promise<void> {
-  console.log('\n🔄 TrackGuard — Synchronisation clients\n');
+  console.log('\n🔄 TrackGuard — Synchronisation clients depuis API Flow Client\n');
 
-  // Step 1: List all GA4 properties from service account
-  console.log('1️⃣  Récupération des propriétés GA4 via le service account...');
-  let properties;
-  try {
-    properties = await listProperties(env);
-  } catch (err) {
-    console.error(`❌ Impossible de lister les propriétés GA4: ${err instanceof Error ? err.message : err}`);
-    console.error('   Vérifiez que les credentials Google sont configurés dans .env');
-    process.exitCode = 1;
-    return;
-  }
+  // Step 1: Get all clients with websites
+  console.log('1️⃣  Récupération de tous les clients actifs avec un site web...');
+  const allClients = getAllClientsWithWebsites();
+  console.log(`   ✅ ${allClients.size} clients actifs avec website\n`);
 
-  if (properties.length === 0) {
-    console.log('   Aucune propriété GA4 trouvée.');
-    process.exitCode = 1;
-    return;
-  }
+  // Step 2: For each client, get sites-web with GA4/GTM IDs
+  console.log('2️⃣  Récupération des sites-web avec IDs GA4/GTM...\n');
 
-  console.log(`   ✅ ${properties.length} propriété(s) GA4 trouvée(s)\n`);
+  const clientConfigs: ClientConfig[] = [];
+  let scanned = 0;
+  let withGA4 = 0;
 
-  // Step 2: For each property, try to match with MV API client
-  console.log('2️⃣  Matching avec l\'API Flow Client MV Group...\n');
+  for (const [code, client] of allClients) {
+    scanned++;
+    if (scanned % 50 === 0) {
+      console.log(`   Progression: ${scanned}/${allClients.size}...`);
+    }
 
-  const clients: ClientConfig[] = [];
-  const unmatched: string[] = [];
+    const sites = getClientSitesWeb(code);
+    const ga4Sites = sites.filter(s =>
+      s.analytics_fournisseur === 'GA4' && s.analytics_id
+    );
 
-  for (const prop of properties) {
-    process.stdout.write(`   ${prop.displayName} (${prop.name})... `);
+    if (ga4Sites.length === 0) continue;
 
-    const { mvClient, sites } = await matchPropertyToClient(prop.displayName, undefined);
+    // Detect template from prestations
+    const template = detectTemplate(code);
+    const events = TEMPLATE_EVENTS[template] || ['page_view'];
 
-    if (mvClient) {
-      const presta = await getClientPrestations(mvClient.code_client);
-      const template = detectTemplate(presta.hasTracking, presta.hasEcommerce);
-      const url = mvClient.website || sites[0] || '';
+    // Group sites by property ID (multiple URLs can share same property)
+    const byProperty = new Map<string, MVSiteWeb[]>();
+    for (const site of ga4Sites) {
+      const propId = normalizePropertyId(site.analytics_id!);
+      if (!byProperty.has(propId)) byProperty.set(propId, []);
+      byProperty.get(propId)!.push(site);
+    }
 
-      // Get template events
-      const templateEvents: Record<string, string[]> = {
-        vitrine: ['page_view'],
-        lead_gen: ['page_view', 'form_submit', 'generate_lead'],
-        ecommerce: ['page_view', 'form_submit', 'add_to_cart', 'begin_checkout', 'purchase'],
-      };
+    for (const [propertyId, propertySites] of byProperty) {
+      // Skip measurement IDs (G-XXX) — we need property IDs for the API
+      if (propertyId.startsWith('G-')) continue;
 
-      clients.push({
-        name: `${mvClient.raison_sociale} (${mvClient.code_client})`,
-        ga4_property_id: prop.name,
+      const mainSite = propertySites[0]!;
+      const gtmId = (mainSite.tag_manager_id || '').trim() || undefined;
+
+      withGA4++;
+      clientConfigs.push({
+        name: `${client.raison_sociale} (${code})`,
+        ga4_property_id: propertyId,
         template,
-        url,
-        events_monitored: templateEvents[template] || ['page_view'],
+        url: mainSite.url,
+        events_monitored: events,
         critical_pages: ['/'],
         thresholds: {
           pageview_drop_pct: 40,
@@ -190,35 +186,16 @@ export async function runSyncClients(env: EnvConfig): Promise<void> {
           active_users_min: 1,
         },
       });
-
-      console.log(`✅ → ${mvClient.raison_sociale} (${template})`);
-    } else {
-      // Add with just GA4 info, manual enrichment needed
-      clients.push({
-        name: prop.displayName,
-        ga4_property_id: prop.name,
-        template: 'vitrine',
-        url: '',
-        events_monitored: ['page_view'],
-        critical_pages: ['/'],
-        thresholds: {
-          pageview_drop_pct: 40,
-          event_zero_days: 1,
-          active_users_min: 1,
-        },
-      });
-
-      unmatched.push(prop.displayName);
-      console.log(`⚠️  Pas de correspondance MV API — ajouté en mode vitrine`);
     }
   }
+
+  console.log(`\n   ✅ ${withGA4} propriétés GA4 trouvées sur ${scanned} clients scannés\n`);
 
   // Step 3: Write clients.json
   const outputPath = resolve(process.cwd(), 'clients.json');
 
-  // Load existing templates or use defaults
   const clientsFile: ClientsFile = {
-    clients,
+    clients: clientConfigs,
     templates: {
       vitrine: { events: ['page_view'], description: 'Site vitrine — monitoring pageviews uniquement' },
       lead_gen: { events: ['page_view', 'form_submit', 'generate_lead'], description: 'Site lead generation — pageviews + formulaires' },
@@ -228,16 +205,18 @@ export async function runSyncClients(env: EnvConfig): Promise<void> {
 
   writeFileSync(outputPath, JSON.stringify(clientsFile, null, 2), 'utf-8');
 
-  console.log(`\n3️⃣  Fichier clients.json généré: ${outputPath}`);
-  console.log(`   ✅ ${clients.length} client(s) configuré(s)`);
+  console.log(`3️⃣  Fichier clients.json généré: ${outputPath}`);
+  console.log(`   ✅ ${clientConfigs.length} site(s) GA4 à monitorer\n`);
 
-  if (unmatched.length > 0) {
-    console.log(`   ⚠️  ${unmatched.length} propriété(s) sans correspondance MV API:`);
-    for (const name of unmatched) {
-      console.log(`      • ${name} — à enrichir manuellement`);
-    }
+  // Summary
+  console.log('─'.repeat(60));
+  console.log('📊 Résumé par template:');
+  const byTemplate = { vitrine: 0, lead_gen: 0, ecommerce: 0 };
+  for (const c of clientConfigs) {
+    byTemplate[c.template as keyof typeof byTemplate]++;
   }
-
-  console.log('\n' + '─'.repeat(60));
-  console.log('Prochaine étape: vérifier clients.json puis lancer `npm run check`');
+  console.log(`   Vitrine:    ${byTemplate.vitrine}`);
+  console.log(`   Lead Gen:   ${byTemplate.lead_gen}`);
+  console.log(`   E-commerce: ${byTemplate.ecommerce}`);
+  console.log('\nProchaine étape: vérifier clients.json puis lancer `npm run check`');
 }
